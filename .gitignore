@@ -1,0 +1,44 @@
+# macOS and editor temporary files
+.DS_Store
+._*
+*.swp
+*.swo
+*~
+
+# Python environments and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+
+# Local credentials and environment configuration
+.env
+.env.*
+!.env.example
+.aws/
+
+# Training data, model weights, checkpoints and experiment output
+dataset/
+datasets/
+checkpoints/
+outputs/
+output/
+wandb/
+logs/
+*.log
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Temporary artifacts
+/tmp/

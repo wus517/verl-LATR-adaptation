@@ -18,6 +18,7 @@ from typing import Optional
 from omegaconf import MISSING, DictConfig, OmegaConf
 
 from verl.base_config import BaseConfig
+from verl.experimental.latr.config import LATRConfig
 from verl.utils.profiler import ProfilerConfig
 from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
@@ -218,6 +219,8 @@ class RolloutConfig(BaseConfig):
 
     calculate_log_probs: bool = False
 
+    latr: LATRConfig = field(default_factory=LATRConfig)
+
     agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
 
     trace: TraceConfig = field(default_factory=TraceConfig)
@@ -275,6 +278,9 @@ class RolloutConfig(BaseConfig):
 
     def __post_init__(self):
         """Validate the rollout config"""
+        if isinstance(self.latr, dict | DictConfig):
+            object.__setattr__(self, "latr", LATRConfig(**dict(self.latr)))
+
         # Deprecation warning for mode field - only async mode is supported
         if self.mode == "sync":
             raise ValueError(

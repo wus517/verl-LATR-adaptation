@@ -291,3 +291,10 @@ EOS 跳过、数学符号例外、强制退出和复制补齐都会影响检查�
 | 重复行恢复 prompt 组 | V1 worker 按 prompt 启动多个 session，数据经 TransferQueue 流转 |
 
 迁移设计与阶段验收见 [适配计划](latr_verl_0_9_adaptation.md)。
+
+
+## 2026-11-02 适配进展
+
+旧 `latr/` 保持只读参考。新实现位于 `verl-0.9.0/verl/experimental/latr/`，通过 V1 组生成和内置 vLLM 服务接入，不复制旧 HF decoder/cache。目标为 NPU + Qwen3.5-9B；模块映射、行为差异与验证边界见适配计划第 14 节。根 Git 已由用户建立，初始提交 `290cdd1`。
+
+运行入口与设备验收步骤：[LATR 运行说明](../verl-0.9.0/examples/latr/README.md)。

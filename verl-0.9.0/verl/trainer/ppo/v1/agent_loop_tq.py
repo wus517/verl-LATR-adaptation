@@ -120,13 +120,20 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 apply_greedy_sampling_params(run_sampling_params)
 
             tasks = []
-            for i in range(n):
-                task = asyncio.create_task(
-                    self._run_agent_loop(
-                        run_sampling_params, trajectory=trajectory, trace=trace, session_id=i, **prompt
+            # One tree owns the whole prompt group. Validation and explicit greedy baselines
+            # keep the existing independent-session path.
+            if self.rollout_config.latr.enable and not trajectory["validate"] and do_sample:
+                from verl.experimental.latr.agent_loop import run_latr_group
+
+                tasks.append(asyncio.create_task(run_latr_group(self, prompt, run_sampling_params, trajectory, n)))
+            else:
+                for i in range(n):
+                    task = asyncio.create_task(
+                        self._run_agent_loop(
+                            run_sampling_params, trajectory=trajectory, trace=trace, session_id=i, **prompt
+                        )
                     )
-                )
-                tasks.append(task)
+                    tasks.append(task)
 
             # Publish a terminal status only after every session settles, so no sibling can write after
             # ReplayBuffer clears a failed group.
@@ -141,6 +148,12 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             else:
                 status = "finished"
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": status})
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await _settle_session_tasks(tasks)
+            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
+            raise
         except Exception as e:
             logger.exception(f"Error in _run_prompt: {e}")
             if tasks:

@@ -223,3 +223,10 @@ DAPO 在此基础上涉及组过滤、非对称 clipping、token 级 loss 聚合
 2. [旧代码实现](latr_code.md)，恢复真实行为与已知问题。
 3. [适配计划](latr_verl_0_9_adaptation.md)，恢复当前进度、实现候选和验收条件。
 4. 开始编码前重新检查相关源码；文档不是对后续修改的自动证明。
+
+
+## 2026-11-02 适配进展
+
+首版算法实现已落地到 `verl-0.9.0/verl/experimental/latr/core.py`。采用论文 Countdown 阈值和全局候选概率排序、旧窗口时钟；树预算 512、默认关闭数学符号豁免，差异与验证状态见适配计划第 14 节。CPU 行为验证不等于 NPU 训练或论文指标复现。
+
+运行入口与设备验收步骤：[LATR 运行说明](../verl-0.9.0/examples/latr/README.md)。

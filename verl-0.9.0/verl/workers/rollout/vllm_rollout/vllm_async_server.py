@@ -538,6 +538,13 @@ class vLLMHttpServer:
             )
 
         prompt_ids = normalize_token_ids(prompt_ids)
+        # Internal LATR probes request top candidates rather than just the chosen token.
+        from verl.experimental.latr.vllm_contract import pop_candidate_count
+
+        sampling_params = dict(sampling_params)
+        latr_candidate_count = pop_candidate_count(
+            sampling_params, enabled=self.config.latr.enable, logprobs_mode=self.config.logprobs_mode
+        )
 
         # Calculate the maximum possible new tokens based on available context space
         # This serves as a safety upper bound. vLLM v0.20+ rejects `max_tokens < 1`
@@ -572,7 +579,10 @@ class vLLMHttpServer:
         assert 1 <= max_tokens <= max_possible_tokens, (
             f"max_tokens {max_tokens} not in valid range [1, {max_possible_tokens}]"
         )
-        sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
+        want_logprobs = sampling_params.pop("logprobs", False)
+        sampling_params["logprobs"] = (
+            latr_candidate_count if latr_candidate_count is not None else (0 if want_logprobs else None)
+        )
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
         # Inject per-request seed for deterministic sampling when full_determinism is enabled.
@@ -646,6 +656,10 @@ class vLLMHttpServer:
             result_dict=extra_fields,
         )
         token_ids = final_res.outputs[0].token_ids
+        if latr_candidate_count is not None:
+            from verl.experimental.latr.vllm_contract import extract_candidates
+
+            extra_fields["latr_candidates"] = extract_candidates(final_res.outputs[0].logprobs, latr_candidate_count)
         log_probs = None
         if sampling_params.logprobs is not None:
             log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]

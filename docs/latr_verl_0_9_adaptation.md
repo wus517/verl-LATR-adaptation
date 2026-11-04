@@ -2,7 +2,7 @@
 
 更新时间：2026-11-02。
 
-状态：调研与计划阶段。此文件记录候选设计与验收要求，不代表已选择最终后端，也不代表功能已实现或已测试。
+状态：首版逐 token vLLM 请求实现被用户因效率问题否决。2026-11-04 用户新增“实现不麻烦、效率较高”的权衡要求，最新建议为“带持久缓存的 HF/NPU 批量树前缀 + 原版 vLLM 批量续写”，见 `latr_engine_design.md` 第 8 节；仍是建议，未实施。此前原生引擎树方案保留作长期优化。目标为 NPU、Qwen3.5-9B，具体设备/软件版本待提供。
 
 配套文档：[算法细节](latr_algorithm.md)、[旧代码实现](latr_code.md)。
 
@@ -10,7 +10,7 @@
 
 目标：依据本地论文与旧代码，在本地 `verl-0.9.0/` 上实现 LATR。
 
-当前用户要求按步骤推进：先理解论文和代码，再做适配。本轮补充要求是将理解和计划持久化到 Markdown。
+用户已要求开始实施；继续保留算法、旧代码、适配计划三份 Markdown 作为恢复上下文。旧 `latr/` 仅供参考，所有实现写入 `verl-0.9.0/`。
 
 截至本次文档更新：
 
@@ -19,15 +19,13 @@
 - [x] 记录论文与实际脚本差异，以及旧实现问题。
 - [x] 查看新版默认入口、V1/TransferQueue、rollout 接口和权重同步入口。
 - [x] 建立三份可持续更新的上下文文档。
-- [ ] 确定迁移行为基线与首个实现后端。
-- [ ] 修改算法实现或新版训练代码。
-- [ ] 运行单元测试、GPU 生成、训练或性能复现。
+- [x] 确定首版行为基线与服务后端 B（见第 14 节）。
+- [x] 实现独立树核心、vLLM 候选扩展及 V1 组级桥接。
+- [x] 运行 CPU 单元/模拟边界测试、Hydra 组合与脚本参数检查。
+- [ ] 在目标 NPU 验证候选、续写、baseline 与至少两步 LATR 训练。
+- [ ] 验证保存/恢复、多卡稳定性和性能。
 
-用户已要求建立独立的新 Git 仓库，`latr/` 仅作参考，不沿用它的仓库历史。检查发现 `latr/` 和 `verl-0.9.0/` 各自含 `.git`，且工作区均无未提交修改。
-
-拟采用项目根目录统一管理：新分支 `main`；将两个旧 `.git` 备份到新仓库 `.git/legacy-repositories/`，源码按普通文件跟踪，不使用 gitlink；论文和本组文档一并纳入初始提交，不配置远程仓库。
-
-当前状态：已新增根目录 `.gitignore`；`git init -b main` 因沙箱禁止写入 `.git` 失败，随后申请的提权执行又因自动审批服务返回 `404 model not found` 而未执行。尚未初始化根仓库、移动旧元数据或创建初始提交。恢复时先检查实际状态，再继续，不假定上述拟定步骤已完成。
+Git 状态：用户已建立独立的根仓库，分支 `main`，初始提交 `290cdd1 chore: initialize LATR adaptation workspace`。本轮改动位于该根仓库工作区，未提交、未配置或推送远程；不沿用旧 latr 的 Git 历史。
 
 ## 2. 以本地目标源码为准的事实
 
@@ -93,7 +91,7 @@ prompt 状态按 `uid` 管理，轨迹 key 形式为 `{uid}_{session_id}_{index}
 
 ## 3. 建议的最小目标
 
-以下是实施建议，尚未由用户选择为最终方案：
+首版实施范围已采用以下约束：
 
 - 先单轮文本、单个明确模型家族、GRPO，再扩展 Math 与 DAPO。
 - 先适配新版默认 V1 的同步训练模式，rollout 使用新版服务生命周期。
@@ -115,7 +113,7 @@ prompt 状态按 `uid` 管理，轨迹 key 形式为 `{uid}_{session_id}_{index}
 | 容量优先级 | 论文候选概率 / 旧代码名次与行顺序 | 分叉预算竞争结果不同 |
 | 数学符号规则 | 关闭 / 保留但修正索引 | 剪枝覆盖与旧实现兼容性不同 |
 | 硬性退出 | 无 / 可配 force-return | 前瞻完成程度、吞吐不同 |
-| 首个运行环境 | 模型、GPU 数量/显存、TP/DP | 是否能使用完整 HF 模型及批大小 |
+| 首个运行环境 | 已知 NPU、Qwen3.5-9B；型号/卡数/显存未知 | 决定 TP/DP、batch 和可运行性 |
 
 推荐先用 Countdown 的编辑距离规则验证核心，再提供独立命名的论文参数与旧脚本配置。不能把修改后的组合含糊命名为“完全复现原始 LATR”。
 
@@ -144,14 +142,14 @@ LATR 配置与调度
 - 后端模块：获得下一 token 分布、延伸路径、可选缓存操作、完成随机续写。
 - 框架模块：prompt/session 映射、reward 后处理、TransferQueue 状态、权重版本。
 
-建议使用明确的包命名空间，避免照搬顶层 `model`、`tools` 造成导入冲突。最终目录名和扩展方式待实现设计确定，不在当前阶段创建占位运行代码。
+建议使用明确的包命名空间，避免照搬顶层 `model`、`tools` 造成导入冲突。实际实现位于 `verl/experimental/latr/`，详见第 14 节。
 
 ## 6. 模型执行后端候选
 
 | 方案 | 优点 | 实际约束 | 当前结论 |
 | --- | --- | --- | --- |
 | A. 独立 HF LATR 服务/worker，必要时接新版 vLLM 续写 | 容易保留完整 logits 和逐 token 树行为 | 需要独立模型显存、权重同步、cache 适配；不能随意取训练 engine 内部 module | 可作为正确性优先的候选，未确认资源可行性 |
-| B. 扩展新版推理服务以支持树形操作 | 复用服务与推理引擎；有优化空间 | 需要 raw top 候选、强制分叉、前缀管理及组级协调；现有接口不足 | 必须先验证 API 能力与性能 |
+| B. 扩展新版推理服务以支持树形操作 | 复用服务与推理引擎；有优化空间 | raw top 候选 + 显式前缀续写 + 组级协调；逐 token 请求较慢 | 首版已选并实现；真实设备能力与性能待验证 |
 | C. 暂以旧 V0 trainer 作为桥接 | 部分历史结构更接近旧实现 | 仍然使用新 rollout 接口，旧 FSDP worker 不存在；容易形成长期维护分支 | 不作为默认推荐路径 |
 
 ### 6.1 方案 B 不能假定现有 logprobs 已足够
@@ -215,10 +213,10 @@ LATR 需要的是分叉点的多个 raw-probability 候选；默认 `logprobs_mo
 
 ### 阶段 0：确定基线与后端能力
 
-- 核实目标训练机器的 CUDA、GPU 显存、Python、PyTorch、Transformers、vLLM 版本。
+- 核实目标 NPU 型号/显存、CANN、Python、PyTorch/torch_npu、Transformers、vLLM/vllm-ascend 版本。
 - 选择论文或旧脚本行为基线，登记所有差异。
 - 对候选后端做最小能力验证：raw 候选、固定前缀续写、权重更新、EOS/长度。
-- 明确本地源码 `AGENTS.md` 等适用要求；本次文档位于根目录 docs，未修改框架源码。
+- 明确本地源码 `AGENTS.md` 等适用要求；实施前已阅读 `verl-0.9.0/AGENTS.md`，按现有入口与配置扩展。
 
 验收：得到可运行的后端小样例与明确选型，不靠私有 API 假设直接进入训练集成。
 
@@ -270,7 +268,7 @@ LATR 需要的是分叉点的多个 raw-probability 候选；默认 `logprobs_mo
 
 ## 10. 核心验证用例
 
-这些是算法迁移所需的行为测试，不为当前仅新增 Markdown 编写代码测试。
+以下为迁移验收清单；第 14 节说明已运行的 CPU 用例及其与真实设备验收的区别。
 
 | 用例 | 必须验证的结果 |
 | --- | --- |
@@ -309,9 +307,9 @@ LATR 需要的是分叉点的多个 raw-probability 候选；默认 `logprobs_mo
 | 2026-11-02 | 用户要求先阅读，再逐步适配 | 已执行阅读 |
 | 2026-11-02 | 用户要求算法、代码、适配计划分别持久化 | 已建立本组文档 |
 | 2026-11-02 | 新版默认 V1 + TQ；旧 KTRollout 不能原样复制 | 已静态确认 |
-| 2026-11-02 | 数学符号过滤导致索引列表错位 | 已静态确认，未修复 |
-| 2026-11-02 | 首版后端、配置基线、运行硬件 | 尚未确定 |
-| 2026-11-02 | 用户要求建立独立根 Git 仓库，旧 latr 仓库仅参考 | 已确认；初始化被环境权限及审批服务故障阻塞，旧仓库未改动 |
+| 2026-11-02 | 旧数学符号过滤导致索引列表错位 | 新树核心以稳定 ID 成对比较，避免平行列表错位；CPU 已测试 |
+| 2026-11-02 | 首版后端 B、论文 Countdown 阈值、NPU + Qwen3.5-9B | 已实现；设备规格待补充，真实训练待验证 |
+| 2026-11-02 | 独立根 Git 仓库 | 用户已完成初始化，初始提交 290cdd1 |
 
 后续每次实际决策或实现后，更新本表和阶段勾选；记录修改文件、验证命令、真实结果与未解决项。只有运行过的检查才能写成“通过”。
 
@@ -319,5 +317,89 @@ LATR 需要的是分叉点的多个 raw-probability 候选；默认 `logprobs_mo
 
 1. 阅读 [算法细节](latr_algorithm.md)，再读 [旧代码实现](latr_code.md)。
 2. 查看本文状态与决策表，区分建议和已确认选择。
-3. 下一步优先完成阶段 0：行为基线与后端能力验证。
-4. 未经新的具体实施安排，不将本文计划写成已实现功能；用户后续要求开始适配时，沿本计划推进并及时修订。
+3. 阅读第 14 节和 `examples/latr/README.md`，检查工作区与实际测试结果。
+4. 优先阅读第 16 节与 `latr_engine_design.md`：保留逐 token 算法但在引擎内执行，落实持久共享缓存；不要沿历史方案扩大训练，也不要重复初始化 Git。
+
+
+## 14. 2026-11-02 首版实施记录
+
+### 已实现文件与调用链
+
+```text
+main_ppo -> validate_training_config
+  -> AgentLoopWorkerTQ._run_prompt
+     -> run_latr_group（每个 UID 一次，目标 n 条）
+        -> LATRGenerator（分叉、窗口、剪枝、混合、补齐）
+           -> VLLMTokenBackend
+              -> LLMServerClient -> vLLMHttpServer.generate
+                 -> raw top candidates / 显式前缀续写
+        -> AgentLoopOutput -> 原有 _agent_loop_postprocess
+  -> 原有 ReplayBuffer / actor-ref logprob / GRPO / CheckpointEngine
+```
+
+- `verl/experimental/latr/config.py`：参数、指数/分段调度和不兼容训练配置拒绝。
+- `core.py`：无 torch 依赖的树生成器、稳定分支 ID、递归删除、EOS/长度、并发任务收敛。
+- `backend.py`：共享 worker 并发上限，prompt+response prefix 请求；树与续写全部检查同一非空权重版本。
+- `vllm_contract.py` + vLLM 服务 `generate`：内部候选数量独立字段，保留 top-k 数量而非布尔转换；要求 raw logprob，不对 top 候选重新归一化。
+- `agent_loop.py` + V1 `_run_prompt`：组级接入，完整 response/mask；验证与显式 greedy fallback 保留原路径。失败/取消时等待子任务结束，再发布组终态。
+- `workers/config/rollout.py`、rollout YAML、`utils/config.py`：配置接入，默认关闭。
+- `examples/latr/`：数据格式转换、新 reward、通用脚本、Qwen3.5-9B NPU 脚本、后端 probe 和运行说明。
+- `tests/experimental/latr/test_latr_on_cpu.py`：标准库测试；真实框架方法使用模拟外部服务执行，不需要 torch/Ray/vLLM。
+
+### 已固定的行为与差异
+
+- 论文 Countdown 阈值 `.25/.15`、编辑距离 `.4`、窗口 `[20,30,50]`。
+- 保留旧实现的“窗口包含分叉 token”计时；容量竞争选择论文式全局备选概率排序，不复刻旧 rank/row 遍历顺序。
+- 默认数学符号豁免关闭；可启用且没有旧平行列表错位。suffix/ROUGE-L 为可选项。
+- `η=1*0.985**global_step`，恢复后根据训练步计算；每 prompt `round(n*η)` 条树路径，提供分段常数覆盖。
+- 树硬上限 512 token，饱和比例 1.0、不衰减；可配置旧式饱和松弛。这是显式组合基线，不宣称完整重现所有旧脚本。
+- 不做 HF cache clone；前缀由服务重新处理。Qwen3.5 初始关闭 prefix caching，可能很慢，未声称性能等同旧混合引擎。
+- 训练完整回答；不提供树策略行为概率，不启用 rollout correction 或 bypass。
+- 每 session `extra_fields.latr` 保存分叉/剪枝/补齐/窗口/退出统计，尚无 console 聚合。
+- 首版支持 V1 同步 trainer、内置 vLLM async 服务、单轮文本 GRPO；未验证 Math/DAPO、多模态、工具、完全异步或自定义服务。
+
+### 已运行的验证及实际边界
+
+本机 macOS / Python 3.14，没有 torch、Ray、vLLM 和 NPU。核心测试使用标准库；Hydra/OmegaConf 与 Ruff 从本机已有 uv 缓存加载执行，没有变更训练环境依赖。验证结果：31 个测试全部通过（包含 Hydra 组合用例，无跳过）；Ruff check、脚本 bash -n、git diff --check 通过。标准测试命令见运行说明。
+
+覆盖算法边界、20/30/50 时钟、子孙剪枝、容量排序、混合退火、EOS/补齐、前后缀拼接、UID 隔离、版本混用拒绝、生成失败和取消后的任务收敛、组发布与 mask、实际 vLLM 方法的候选数量传递、实际 shell 参数及 Hydra YAML 组合。真实模型 logits、NPU 内核、Ray/TQ 集群、训练梯度和 CheckpointEngine 更新没有在本机验证。
+
+### 下一步设备验收
+
+按 [运行说明](../verl-0.9.0/examples/latr/README.md)：数据转换 -> raw top-2/prefix probe -> 普通 GRPO baseline -> 两步短树 LATR -> 完整窗口与验证 -> 保存/恢复 -> 性能。设备 probe 通过也不等于训练通过。记录 NPU 型号/数量/显存及软件版本后，再调整 TP、batch 和 offload。
+
+## 15. 用户否决逐 token 请求后的新方案（设计，尚未实现）
+
+2026-11-02：用户明确认为逐 token 请求 vLLM 效率过低，要求新的方案。第 14 节和现有启动脚本描述的是被否决的旧执行后端，不能当作已接受的最终架构。
+
+### 推荐：专用 LATR rollout worker + Transformers/NPU 持久混合缓存 + 批量 decode
+
+保留 V1 组级输入/完整输出、reward/GRPO 和权重版本约束，将模型执行整体迁入长驻 rollout worker。一次调用提交一个 prompt microbatch 及各组目标 n，返回完整回答；token 循环全部在 worker 内进行。树拓扑规则可复用，但现有“每 branch 调一次 backend.candidates”的执行接口必须替换为批量 step 接口。
+
+1. 每个 prompt microbatch 对独立根路径 prefill 一次，保存完整模型状态。
+2. 在同一个推理副本内，将多 prompt 的活动树路径合批；每步输入各路径最新的一个 token，加持久缓存，完成一次批量 forward。
+3. 在 NPU 上由 raw logits 的 top-k 与全词表 logsumexp 计算真实候选概率。只传小规模候选/决策数据，不逐步传完整 logits 或全前缀。
+4. 接受分叉时，把已处理共同前缀的父状态复制到空闲子槽，父/子分别写入不同 pending token，下个 decode step 才消费。剪枝同步释放后代的缓存槽、mask、position 和树元数据。避免混淆“已写入 token”和“已进入缓存的 token”。
+5. 缓存包括 attention K/V、Gated DeltaNet convolution state、recurrent state；它们必须一起 fork/select/release。初版允许在分叉/剪枝时做缓存行复制，不要求立即实现 paged copy-on-write；不可每 token 深拷贝整份缓存。
+6. 第一阶段让普通采样、树阶段及树结束后的随机续写都在同一 worker、同一模型中完成，直接复用缓存，避免 HF/vLLM 双模型生命周期。后续如实测显示有收益，再加入“整棵树结束后仅交接一次到 vLLM”的可选混合方案；该交接会重新 prefill。
+7. 对接新版 rollout replica/server 生命周期及 CheckpointEngine 权重接收，训练/推理按阶段 wake/offload；不直接访问 actor 的内部 FSDP module。多卡副本必须用统一的分支决策与 collective 顺序；首个后端实现优先明确副本内并行策略，不能假定 9B 单卡可容纳。
+
+这会消除逐 token RPC 与反复全前缀 prefill，保留自回归模型本身每 token 的 decode forward。仍有缓存复制、动态树宽、host/device 决策同步与 NPU 算子效率成本；吞吐需实测，不能承诺等同 vLLM 或某个加速倍数。
+
+### Qwen3.5 缓存接口证据与首要验收
+
+本次静态检查发现本机 uv 缓存中的 Transformers 5.9.0：Qwen3.5 使用按层混合 DynamicCache，linear attention 层含 conv_states/recurrent_states，reorder_cache 通过 index_select 选择批次行。但本 checkout 的部分训练 patch 仍访问另一种 cache 布局，目标 NPU 软件版本未知。此发现仅证明有可适配的接口，不代表当前训练 patch 或实际设备模型可直接用于 cached decode。
+
+需要独立 inference 模型路径和版本明确的 cache adapter，不盲目套用训练 forward patch 或旧 MixedCache。首个设备验收是：同一共同前缀 fork 出不同 token，分别缓存续写，与两个独立完整前缀 forward 的下一步 logits 比较；再覆盖两子分支互不污染、多次 fork/prune、EOS/position/padding、多 prompt 批处理和权重更新后清空旧缓存。之后接通至少两步完整训练并记录性能。
+
+### 长期备选：在 vLLM/vllm-ascend 引擎内部实现原生树调度
+
+需要 scheduler、模型 runner/sampler、KV block manager 以及 Qwen3.5 recurrent-state manager 的 fork/free 协作，主干共享 KV block，写入时 copy-on-write，循环状态独立复制；剪枝释放资源，树结束直接切普通采样。不是把外部循环搬到 HTTP server，也不是仅打开 prefix caching。
+
+该方案潜在吞吐更高，原有权重同步链更易保留，但要绑定目标机器的 vLLM/vllm-ascend 版本并维护引擎扩展。仓库未包含这两个引擎的源码，当前不能声称已有可用的 fork API，因此不作为最快完成正确适配的首选。
+
+## 16. 进一步明确资源目标后的推荐（取代第 15 节推荐次序）
+
+用户进一步强调算法逐 token 推进是必要的，要求减少额外时间和显存。当前推荐正式采用“vLLM/vllm-ascend 引擎内 LATR”作为目标架构；第 15 节专用 HF worker 仅作正确性对照候选。理由是共享分页 KV、复用单套 rollout 权重和现有推理 kernels/TP，比复制整行历史缓存和维护独立模型更贴合最终资源目标。
+
+完整设计、分叉时机、Qwen3.5 状态所有权、容量约束与实施验收见 [LATR 高效 rollout 执行方案](latr_engine_design.md)。这是设计决策记录，尚未完成引擎扩展或设备验证；不得将规划接口当成已有 API。

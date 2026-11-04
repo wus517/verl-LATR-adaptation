@@ -92,6 +92,58 @@ enable_prefix_caching: True
 # logprobs mode for rollout logprobs
 logprobs_mode: processed_logprobs
 
+# LATR is coordinated per prompt by the V1 TransferQueue worker.
+# Requires vLLM, raw_logprobs, and trainer.v1.trainer_mode=sync.
+latr:
+
+  # Keep ordinary generation unchanged unless explicitly enabled.
+  enable: false
+
+  # Includes the main candidate; two means at most one new child per parent per step.
+  max_n_branch_per_token: 2
+
+  # Raw probability lower bound for alternative tokens.
+  prob_filter_abs_thres: 0.25
+
+  # Maximum raw probability gap between the main and alternative tokens.
+  prob_filter_rel_thres: 0.15
+
+  # Window lengths include the branching token, matching the old decoder's clock.
+  rollout_filter_steps: [20, 30, 50]
+
+  # Prune when normalized edit distance is below this value; null disables it.
+  rollout_filter_edit_dist_thres: 0.4
+
+  # Optional similarity filters used by the old Math scripts.
+  rollout_filter_suffix_match_thres: null
+
+  # Prune when token ROUGE-L similarity exceeds this value.
+  rollout_filter_rouge_l_thres: null
+
+  # Optional mathematical-token exception; disabled for the paper baseline.
+  keep_math_symbols: false
+
+  # Exponential hybrid ratio: initial * decay ** global_step.
+  mix_ratio_initial: 1.0
+
+  # Countdown paper setting; use 0.995 for Math.
+  mix_ratio_decay: 0.985
+
+  # Nonempty step->ratio mapping overrides exponential decay; must include step 0.
+  mix_ratio_schedule: {}
+
+  # Hard tree-generation limit; -1 uses the full response budget.
+  force_return_step: 512
+
+  # Group saturation fraction before switching to ordinary continuation.
+  return_nb_thres_init: 1.0
+
+  # Optional linear relaxation over the response budget, as in the old implementation.
+  return_nb_thres_decay: 0.0
+
+  # Bound in-flight token requests across all LATR groups on one agent-loop worker.
+  max_concurrent_requests: 64
+
 # scheduling policy for vllm rollout
 scheduling_policy: fcfs
 

@@ -83,6 +83,10 @@ def validate_config(
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
     """
+    from verl.experimental.latr.config import validate_training_config
+
+    validate_training_config(config)
+
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 

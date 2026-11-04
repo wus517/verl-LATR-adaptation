@@ -29,13 +29,31 @@ class PPOTrainerSync(PPOTrainer):
     """
 
     def on_init_end(self):
+        self._latr_policy_version = self.global_steps
+        if self.config.actor_rollout_ref.rollout.latr.enable:
+            return  # Delay vLLM wake until the full cached tree phase ends.
         # update weights after loading checkpoint
         self.checkpoint_manager.update_weights(self.global_steps)
 
     def on_step_end(self):
+        self._latr_policy_version = self.global_steps
+        if self.config.actor_rollout_ref.rollout.latr.enable:
+            return
         with marked_timer("update_weights", self.timing_raw, color="red"):
             # wake up all replicas to update weights
             self.checkpoint_manager.update_weights(self.global_steps)
+
+    def on_validate_begin(self):
+        if self.config.actor_rollout_ref.rollout.latr.enable:
+            self.checkpoint_manager.sleep_replicas()
+            self.checkpoint_manager.update_weights(self._latr_policy_version)
+
+    def _submit_batch_to_rollout(self, batch):
+        if self.config.actor_rollout_ref.rollout.latr.enable:
+            from verl.experimental.latr.hybrid import prepare_batch
+
+            prepare_batch(self, batch)
+        return super()._submit_batch_to_rollout(batch)
 
     def on_sample_end(self):
         # sleep all replicas to discard weights and kv cache

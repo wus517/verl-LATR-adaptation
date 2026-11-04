@@ -56,6 +56,44 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         tq.init()
         self.background_tasks = set()
 
+    async def prepare_latr_prompts(self, batch: TensorDict, offset: int):
+        from verl.experimental.agent_loop.agent_loop import DictConfigWrap
+        from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
+        from verl.utils import tensordict_utils as tu
+
+        loop = SingleTurnAgentLoop(
+            trainer_config=DictConfigWrap(self.config),
+            server_manager=self.llm_client,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            dataset_cls=self.dataset_cls,
+            data_config=DictConfigWrap(self.config.data),
+        )
+        results = []
+        for i in range(len(batch)):
+            prompt = {
+                k: v[i] if isinstance(v, (list, torch.Tensor)) else v
+                for k, v in ((k, tu.get(batch, k)) for k in batch.keys())
+            }
+            if prompt.get("agent_name", "single_turn_agent") != "single_turn_agent":
+                raise ValueError("Hybrid LATR supports only single_turn_agent")
+            messages = list(prompt["raw_prompt"])
+            multimodal = await loop.process_multi_modal_info(messages)
+            if any(value is not None for value in multimodal.values()):
+                raise ValueError("Hybrid LATR tree phase currently supports text inputs only")
+            if not bool(prompt.get("__do_sample__", True)):
+                continue  # Explicit greedy requests use the ordinary agent path.
+            results.append(
+                dict(
+                    index=offset + i,
+                    prompt_ids=await loop.apply_chat_template(messages),
+                    n=int(prompt.get("__rollout_n__", self.rollout_config.n)),
+                    response_length=self.rollout_config.response_length,
+                    global_step=int(prompt["global_steps"]),
+                )
+            )
+        return results
+
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn agent loop for each sample in the batch without waiting for the results."""
         validate = batch["validate"] if "validate" in batch else False
@@ -91,7 +129,8 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 if isinstance(v, torch.Tensor):
                     prompt[k] = v[i]
                 elif isinstance(v, NonTensorStack):
-                    prompt[k] = v[i].data
+                    item = v[i]
+                    prompt[k] = item.data if isinstance(item, NonTensorData) else item
                 elif isinstance(v, NonTensorData):
                     prompt[k] = v.data
                 else:
@@ -118,6 +157,16 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             run_sampling_params = dict(sampling_params)
             if not trajectory["validate"] and not do_sample:
                 apply_greedy_sampling_params(run_sampling_params)
+
+            payload = prompt.pop("latr_payload", None)
+            if payload is not None:
+                from verl.experimental.latr.hybrid import finish_group
+
+                if trajectory["validate"] or len(payload["trajectories"]) != n:
+                    raise ValueError("LATR payload does not match training prompt group")
+                await finish_group(self, payload, run_sampling_params, prompt, False)
+                await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "finished"})
+                return
 
             tasks = []
             for i in range(n):
@@ -255,3 +304,11 @@ class AgentLoopManagerTQ(AgentLoopManager):
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=False)
             ]
         )
+
+    def prepare_latr_prompts(self, prompts: TensorDict):
+        chunks = prompts.chunk(len(self.agent_loop_workers))
+        refs, offset = [], 0
+        for worker, chunk in zip(self.agent_loop_workers, chunks, strict=False):
+            refs.append(worker.prepare_latr_prompts.remote(chunk, offset))
+            offset += len(chunk)
+        return [request for chunk in ray.get(refs) for request in chunk]

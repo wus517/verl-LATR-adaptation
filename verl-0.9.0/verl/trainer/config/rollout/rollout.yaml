@@ -484,3 +484,44 @@ disaggregation:
 
   # InfiniBand device (required for mooncake over RDMA).
   ib_device: null
+
+# Cached HF tree followed by stock vLLM continuation (V1 sync FSDP2 only).
+latr:
+
+  enable: false
+
+  max_n_branch_per_token: 2
+
+  prob_filter_abs_thres: 0.25
+
+  prob_filter_rel_thres: 0.15
+
+  rollout_filter_steps: [20, 30, 50]
+
+  rollout_filter_edit_dist_thres: 0.4
+
+  rollout_filter_suffix_match_thres: null
+
+  rollout_filter_rouge_l_thres: null
+
+  keep_math_symbols: false
+
+  mix_ratio_initial: 1.0
+
+  mix_ratio_decay: 0.985
+
+  mix_ratio_schedule: {}
+
+  force_return_step: 512
+
+  return_nb_thres_init: 1.0
+
+  return_nb_thres_decay: 0.0
+
+  tree_micro_batch_size: 1
+
+  tree_worker_count: 1
+
+  weight_bucket_mb: 128
+
+  attn_implementation: sdpa

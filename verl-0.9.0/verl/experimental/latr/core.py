@@ -1,0 +1,249 @@
+# Copyright 2026 LATR adaptation contributors
+# SPDX-License-Identifier: Apache-2.0
+"""Pure LATR tree state. No model calls, device tensors, or token RPCs."""
+
+import asyncio
+import math
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
+
+from .config import LATRConfig
+
+
+@dataclass(frozen=True)
+class Candidate:
+    token_id: int
+    logprob: float
+
+
+async def gather_settled(awaitables: Sequence[Awaitable]):
+    """Drain siblings on errors/cancellation before a prompt can publish a terminal state."""
+    tasks = [asyncio.ensure_future(item) for item in awaitables]
+    try:
+        outputs = await asyncio.gather(*tasks, return_exceptions=True)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    for output in outputs:
+        if isinstance(output, BaseException):
+            raise output
+    return outputs
+
+
+def edit_distance(a: list[int], b: list[int]) -> int:
+    previous = list(range(len(b) + 1))
+    for i, left in enumerate(a, 1):
+        current = [i]
+        for j, right in enumerate(b, 1):
+            current.append(min(current[-1] + 1, previous[j] + 1, previous[j - 1] + (left != right)))
+        previous = current
+    return previous[-1]
+
+
+def rouge_l(a: list[int], b: list[int]) -> float:
+    previous = [0] * (len(b) + 1)
+    for left in a:
+        current = [0]
+        for j, right in enumerate(b, 1):
+            current.append(previous[j - 1] + 1 if left == right else max(previous[j], current[-1]))
+        previous = current
+    return 2 * previous[-1] / (len(a) + len(b))
+
+
+def suffix_match(a: list[int], b: list[int]) -> float:
+    best = 0
+    for left, right in ((a, b), (b, a)):
+        for length in range(1, len(left) + 1):
+            suffix = left[-length:]
+            if any(right[i : i + length] == suffix for i in range(len(right) - length + 1)):
+                best = max(best, length)
+    return best / len(a)
+
+
+@dataclass
+class Branch:
+    id: int
+    parent: int | None
+    birth_step: int
+    tokens: list[int] = field(default_factory=list)
+
+
+@dataclass
+class Trajectory:
+    tokens: list[int]
+    kind: str
+    prefix_length: int
+    copied: bool = False
+
+
+@dataclass
+class GroupResult:
+    trajectories: list[Trajectory]
+    stats: dict
+
+
+class TreeState:
+    def __init__(
+        self,
+        config: LATRConfig,
+        eos_ids: set[int],
+        decode_token: Callable[[int], str] | None = None,
+    ):
+        self.config = config
+        self.eos_ids = eos_ids
+        self.decode_token = decode_token
+        if config.keep_math_symbols and decode_token is None:
+            raise ValueError("keep_math_symbols requires a token decoder")
+
+    def _ended(self, tokens: list[int]) -> bool:
+        return bool(tokens and tokens[-1] in self.eos_ids)
+
+    def _trim(self, tokens: list[int], limit: int) -> list[int]:
+        for i, token in enumerate(tokens[:limit]):
+            if token in self.eos_ids:
+                return tokens[: i + 1]
+        return tokens[:limit]
+
+    def _redundant(self, a: list[int], b: list[int]) -> bool:
+        cfg = self.config
+        return (
+            (
+                cfg.rollout_filter_edit_dist_thres is not None
+                and edit_distance(a, b) / len(a) < cfg.rollout_filter_edit_dist_thres
+            )
+            or (
+                cfg.rollout_filter_suffix_match_thres is not None
+                and suffix_match(a, b) > cfg.rollout_filter_suffix_match_thres
+            )
+            or (cfg.rollout_filter_rouge_l_thres is not None and rouge_l(a, b) > cfg.rollout_filter_rouge_l_thres)
+        )
+
+    def start(self, n: int, max_new_tokens: int, global_step: int):
+        if n < 1 or max_new_tokens < 1:
+            raise ValueError("LATR group size and response length must be positive")
+        cfg = self.config
+        kt_count = round(n * cfg.mix_ratio(global_step))
+        branches = [Branch(0, None, 0)] if kt_count else []
+        self.next_id = 1
+        stats = {
+            "kt_count": kt_count,
+            "std_count": n - kt_count,
+            "tree_steps": 0,
+            "created": 0,
+            "suppressed": 0,
+            "pruned": 0,
+            "copied": 0,
+            "checks": {str(r): 0 for r in cfg.rollout_filter_steps},
+            "skipped_eos": 0,
+            "skipped_math": 0,
+            "exit_reason": "standard",
+        }
+        tree_limit = min(max_new_tokens, cfg.force_return_step) if cfg.force_return_step >= 0 else max_new_tokens
+        if branches:
+            stats["exit_reason"] = "length" if tree_limit == max_new_tokens else "force_return"
+        self.branches = branches
+        self.stats = stats
+        self.kt_count = kt_count
+        self.n = n
+        self.max_new_tokens = max_new_tokens
+        self.tree_limit = tree_limit
+        self.done = not branches or tree_limit == 0
+
+    @property
+    def active(self):
+        return [] if self.done else [b for b in self.branches if not self._ended(b.tokens)]
+
+    def advance(self, proposals: dict[int, list[Candidate]]):
+        if self.done:
+            raise RuntimeError("Cannot advance a completed tree")
+        cfg, branches, stats = self.config, self.branches, self.stats
+        kt_count, max_new_tokens = self.kt_count, self.max_new_tokens
+        step = stats["tree_steps"] + 1
+        active = self.active
+        if set(proposals) != {b.id for b in active}:
+            raise ValueError("Candidate/cache rows must match live branch IDs")
+        proposals = [proposals[b.id] for b in active]
+        alternatives = []
+        for branch, candidates in zip(active, proposals, strict=True):
+            candidates = sorted(candidates, key=lambda c: (-c.logprob, c.token_id))
+            if not candidates or len({c.token_id for c in candidates}) != len(candidates):
+                raise ValueError("LATR backend must return nonempty, distinct candidates")
+            if any(not math.isfinite(c.logprob) or c.logprob > 1e-5 for c in candidates):
+                raise ValueError("LATR backend returned invalid raw log probabilities")
+            candidates = candidates[: cfg.max_n_branch_per_token]
+            prefix = branch.tokens.copy()
+            main = candidates[0]
+            branch.tokens.append(main.token_id)
+            for candidate in candidates[1:]:
+                if (
+                    math.exp(candidate.logprob) > cfg.prob_filter_abs_thres
+                    and math.exp(main.logprob) - math.exp(candidate.logprob) < cfg.prob_filter_rel_thres
+                ):
+                    alternatives.append((candidate, branch, prefix))
+        # Retain all original paths; allocate remaining width by candidate probability.
+        alternatives.sort(key=lambda item: (-item[0].logprob, item[1].id, item[0].token_id))
+        capacity = kt_count - len(branches)
+        stats["suppressed"] += max(0, len(alternatives) - capacity)
+        for candidate, parent, prefix in alternatives[:capacity]:
+            branches.append(Branch(self.next_id, parent.id, step - 1, prefix + [candidate.token_id]))
+            self.next_id += 1
+            stats["created"] += 1
+
+        by_id = {branch.id: branch for branch in branches}
+        remove = set()
+        for child in branches:
+            age = step - child.birth_step
+            if child.parent is None or age not in cfg.rollout_filter_steps:
+                continue
+            parent = by_id[child.parent]
+            a, b = child.tokens[child.birth_step : step], parent.tokens[child.birth_step : step]
+            # Finished paths retain their real EOS; do not append fake tokens to age them.
+            if any(token in self.eos_ids for token in a + b):
+                stats["skipped_eos"] += 1
+                continue
+            if len(a) != age or len(b) != age:
+                raise RuntimeError("LATR parent and child windows lost alignment")
+            if cfg.keep_math_symbols:
+                token_text = self.decode_token(b[0]).strip()
+                if token_text and all(c in "+-*/\\<>=()[]{}_^&%$0123456789" for c in token_text):
+                    stats["skipped_math"] += 1
+                    continue
+            stats["checks"][str(age)] += 1
+            if self._redundant(a, b):
+                remove.add(child.id)
+        # Stable IDs keep comparisons aligned even when other branches are removed.
+        for branch in branches:
+            if branch.parent in remove:
+                remove.add(branch.id)
+        stats["pruned"] += len(remove)
+        branches = [branch for branch in branches if branch.id not in remove]
+        self.branches = branches
+        stats["tree_steps"] = step
+        if all(self._ended(branch.tokens) for branch in branches):
+            stats["exit_reason"] = "eos"
+            self.done = True
+            return
+        threshold = cfg.return_nb_thres_init - cfg.return_nb_thres_decay * (step - 1) / max_new_tokens
+        if len(branches) >= round(kt_count * threshold) and all(
+            branch.parent is None or step - branch.birth_step >= max(cfg.rollout_filter_steps) for branch in branches
+        ):
+            stats["exit_reason"] = "saturated"
+            self.done = True
+            return
+
+        self.done = step >= self.tree_limit
+
+    def result(self) -> GroupResult:
+        if not self.done:
+            raise RuntimeError("Tree has not completed")
+        trajectories = [Trajectory(branch.tokens.copy(), "latr", len(branch.tokens)) for branch in self.branches]
+        if self.branches:
+            while len(trajectories) < self.kt_count:
+                prefix = self.branches[0].tokens.copy()
+                trajectories.append(Trajectory(prefix, "latr", len(prefix), copied=True))
+                self.stats["copied"] += 1
+        trajectories.extend(Trajectory([], "standard", 0) for _ in range(self.n - self.kt_count))
+
+        return GroupResult(trajectories, self.stats)

@@ -291,3 +291,8 @@ EOS 跳过、数学符号例外、强制退出和复制补齐都会影响检查�
 | 重复行恢复 prompt 组 | V1 worker 按 prompt 启动多个 session，数据经 TransferQueue 流转 |
 
 迁移设计与阶段验收见 [适配计划](latr_verl_0_9_adaptation.md)。
+
+
+## 当前适配实现入口（2026-11-04）
+
+当前新实现位于 `feat/latr-hybrid-cached`，采用带缓存的批量 HF 树阶段，再交给原版 vLLM 续写。详见[混合实现设计与验证边界](latr_engine_design.md)；旧逐 token RPC 实现保存在 `archive/latr-vllm-token-rpc`。本文的论文/旧代码分析仍作为行为依据，当前进度以[实施计划](latr_verl_0_9_adaptation.md)为准。

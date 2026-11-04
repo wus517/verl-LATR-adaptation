@@ -987,7 +987,8 @@ class FSDPEngine(BaseEngine):
         else:
             params = self.module.state_dict()
 
-        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+        if not kwargs.get("raw_hf_keys", False):
+            params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
 
         log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
         if self._is_offload_param and not _skip_staging:

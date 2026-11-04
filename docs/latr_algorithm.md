@@ -223,3 +223,8 @@ DAPO 在此基础上涉及组过滤、非对称 clipping、token 级 loss 聚合
 2. [旧代码实现](latr_code.md)，恢复真实行为与已知问题。
 3. [适配计划](latr_verl_0_9_adaptation.md)，恢复当前进度、实现候选和验收条件。
 4. 开始编码前重新检查相关源码；文档不是对后续修改的自动证明。
+
+
+## 当前适配实现入口（2026-11-04）
+
+当前新实现位于 `feat/latr-hybrid-cached`，采用带缓存的批量 HF 树阶段，再交给原版 vLLM 续写。详见[混合实现设计与验证边界](latr_engine_design.md)；旧逐 token RPC 实现保存在 `archive/latr-vllm-token-rpc`。本文的论文/旧代码分析仍作为行为依据，当前进度以[实施计划](latr_verl_0_9_adaptation.md)为准。

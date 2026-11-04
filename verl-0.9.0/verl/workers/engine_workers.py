@@ -716,6 +716,99 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         assert "actor" in self.role, "save_checkpoint only support actor role"
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def generate_latr_trees(self, requests, version):
+        """Collect current FSDP2 weights, offload training, then run isolated HF trees.
+
+        All ranks consume the same export collectives, even ranks without a tree
+        worker. Only selected ranks send CPU buckets to their colocated actor.
+        vLLM must already be asleep; this method never wakes it.
+        """
+        import ray
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+        from verl.experimental.latr.tree_worker import CachedTreeWorker
+        from verl.plugin.platform import get_platform
+        from verl.utils.device import get_device_id, get_visible_devices_keyword
+
+        cfg = self.config.rollout.latr
+        selected = self.rank < cfg.tree_worker_count
+        local_requests = [r for i, r in enumerate(requests) if i % cfg.tree_worker_count == self.rank]
+        error = None
+        target_dtypes = {}
+        try:
+            if selected and not hasattr(self, "_latr_tree_worker"):
+                visible_key = get_visible_devices_keyword()
+                visible = os.environ.get(visible_key)
+                device = get_device_id()
+                physical = visible.split(",")[device] if visible else str(device)
+                env = {key: "1" for key in get_platform().ray_noset_envvars()}
+                env[visible_key] = physical
+                self._latr_tree_worker = (
+                    ray.remote(CachedTreeWorker)
+                    .options(
+                        num_cpus=0,
+                        num_gpus=0,
+                        scheduling_strategy=NodeAffinitySchedulingStrategy(
+                            ray.get_runtime_context().get_node_id(), soft=False
+                        ),
+                        runtime_env={"env_vars": env},
+                    )
+                    .remote(self.actor.model_config, dict(cfg), self.config.rollout.dtype, get_device_name())
+                )
+            if selected:
+                target_dtypes = ray.get(self._latr_tree_worker.begin_weights.remote())
+        except Exception as exc:
+            error = repr(exc)
+
+        def check_errors():
+            errors = [None] * self.world_size
+            torch.distributed.all_gather_object(errors, error)
+            if any(errors):
+                raise RuntimeError(f"LATR weight preparation failed on training ranks: {errors}")
+
+        check_errors()
+        params, peft = self.actor.engine.get_per_tensor_param(raw_hf_keys=True)
+        if peft is not None:
+            raise ValueError("Hybrid LATR does not support adapter exports")
+        bucket, size = [], 0
+        for name, tensor in params:
+            if selected and error is None:
+                try:
+                    # Preserve HF's FP32 recurrent parameters where required;
+                    # ordinary BF16 weights use half the FP32 export bandwidth.
+                    # Await each bucket to bound Ray object-store use.
+                    cpu_tensor = tensor.detach().to(device="cpu", dtype=target_dtypes[name], copy=True)
+                    bucket.append((name, cpu_tensor))
+                    size += cpu_tensor.numel() * cpu_tensor.element_size()
+                    del cpu_tensor
+                    if size >= cfg.weight_bucket_mb * 1024**2:
+                        ray.get(self._latr_tree_worker.load_bucket.remote(bucket))
+                        bucket, size = [], 0
+                except Exception as exc:
+                    # Peers must still consume every FSDP all-gather before the
+                    # error barrier; early return would hang the other ranks.
+                    error = repr(exc)
+                    bucket, size = [], 0
+            del tensor
+        if selected and error is None:
+            try:
+                if bucket:
+                    ray.get(self._latr_tree_worker.load_bucket.remote(bucket))
+                ray.get(self._latr_tree_worker.finish_weights.remote(version))
+            except Exception as exc:
+                error = repr(exc)
+        del bucket, params
+
+        # CPUOffloadPolicy owns parameter placement; only move optimizer state
+        # explicitly. Never call module.to(device) on a CPUOffloadPolicy model.
+        self.actor.engine.to("cpu", model=False, optimizer=True, grad=False)
+        aggressive_empty_cache(force_sync=True)
+        check_errors()  # also a barrier: no tree model wakes while peers export
+        if not selected or not local_requests:
+            return []
+        return ray.get(self._latr_tree_worker.generate.remote(local_requests, version))
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.

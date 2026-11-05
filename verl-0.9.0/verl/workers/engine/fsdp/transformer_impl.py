@@ -723,9 +723,10 @@ class FSDPEngine(BaseEngine):
         scaler = getattr(self, "scaler", None)
 
         for micro_batch_idx, micro_batch in enumerate(micro_batches):
+            sync_every = getattr(self.engine_config, "grad_sync_every_micro_batch", False)
             sync_ctx = (
                 nullcontext()
-                if forward_only
+                if forward_only or sync_every
                 else self._gradient_sync_context(is_last_micro_batch=micro_batch_idx == len(micro_batches) - 1)
             )
             with ctx, sync_ctx:

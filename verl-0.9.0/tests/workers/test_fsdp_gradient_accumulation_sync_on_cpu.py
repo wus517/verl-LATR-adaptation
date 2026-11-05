@@ -23,6 +23,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardingStrategy, fully_shard
 
+from verl.workers.config import FSDPEngineConfig
 from verl.workers.engine.fsdp import transformer_impl
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngine
 
@@ -51,6 +52,7 @@ class _FSDP2Module:
 def _make_engine(module):
     engine = object.__new__(FSDPEngine)
     engine.module = module
+    engine.engine_config = FSDPEngineConfig()
     return engine
 
 
@@ -90,8 +92,10 @@ def test_gradient_sync_context_keeps_sync_for_final_micro_batch(monkeypatch):
     assert module.events == ["backward"]
 
 
-def test_forward_backward_batch_syncs_only_final_micro_batch(monkeypatch):
+@pytest.mark.parametrize("sync_every", [False, True])
+def test_forward_backward_batch_respects_sync_mode_and_accumulates_gradients(monkeypatch, sync_every):
     engine = _make_engine(_FSDP2Module())
+    engine.engine_config = FSDPEngineConfig(grad_sync_every_micro_batch=sync_every)
     engine.ulysses_sequence_parallel_size = 1
     engine.scaler = None
     engine.get_data_parallel_group = lambda: None
@@ -104,13 +108,14 @@ def test_forward_backward_batch_syncs_only_final_micro_batch(monkeypatch):
         yield
 
     engine._gradient_sync_context = record_sync
+    weight = torch.nn.Parameter(torch.tensor(2.0))
     engine.forward_step = lambda micro_batch, loss_function, forward_only: (
-        micro_batch["loss"].sum(),
+        ((weight * micro_batch["input"] - 1) ** 2).sum(),
         {"metrics": {}},
     )
 
     micro_batches = [
-        TensorDict({"loss": torch.tensor([float(i)], requires_grad=True)}, batch_size=[1]) for i in range(3)
+        TensorDict({"input": torch.tensor([float(i)])}, batch_size=[1]) for i in range(3)
     ]
     monkeypatch.setattr(
         transformer_impl,
@@ -128,9 +133,9 @@ def test_forward_backward_batch_syncs_only_final_micro_batch(monkeypatch):
     data = TensorDict({"loss_mask": torch.ones(3)}, batch_size=[3])
     output = engine.forward_backward_batch(data, loss_function=lambda: None)
 
-    assert sync_states == [False, False, True]
+    assert sync_states == ([] if sync_every else [False, False, True])
     assert len(output) == 3
-    assert all(micro_batch["loss"].grad is not None for micro_batch in micro_batches)
+    torch.testing.assert_close(weight.grad, torch.tensor(14.0))
 
 
 def _build_distributed_model(strategy, mesh):

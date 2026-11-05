@@ -29,6 +29,9 @@ dist/
 # Training data, model weights, checkpoints and experiment output
 dataset/
 datasets/
+# Keep Python dataset modules; these directories contain source code, not training data.
+!/verl-0.9.0/verl/utils/dataset/
+!/latr/verl/utils/dataset/
 checkpoints/
 outputs/
 output/

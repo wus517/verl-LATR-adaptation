@@ -327,19 +327,6 @@ export RAY_gcs_actor_failure_grace_period_ms=60000
 
 echo $RAY_gcs_rpc_server_reconnect_timeout_s
 
-# LATR：在所有节点的 Ray 启动前指定本分支的 verl 源码。
-VERL_DIR=${VERL_DIR:-${PROJECT_ROOT}/verl-0.9.0}
-if [ ! -f "${VERL_DIR}/verl/experimental/latr/hybrid.py" ] && [ -f "${PROJECT_ROOT}/verl/experimental/latr/hybrid.py" ]; then
-    VERL_DIR=${PROJECT_ROOT}
-fi
-if [ ! -f "${VERL_DIR}/verl/experimental/latr/hybrid.py" ]; then
-    echo "LATR source not found; set VERL_DIR to this branch's verl-0.9.0 directory." >&2
-    exit 1
-fi
-VERL_DIR=$(cd "${VERL_DIR}" && pwd) || exit 1
-export PYTHONPATH="${VERL_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
-cd "${VERL_DIR}" || exit 1
-
 # ================= 多节点：启动 Ray 集群 =================
 if [ "${NODE_RANK}" = "0" ]; then
     # ---- 头节点：启动 Ray Head ----

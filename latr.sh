@@ -363,9 +363,8 @@ if [ "${NODE_RANK}" = "0" ]; then
 
             mkdir -p ${LOG_PATH}
 
-            # LATR：保留原参数，在命令末尾追加覆盖；原版不存在的 grad_sync 字段先注册、再移除。
+            # LATR：保留原参数，在命令末尾追加覆盖
             python3 -m verl.trainer.main_ppo \
-                +actor_rollout_ref.actor.fsdp_config.grad_sync_every_micro_batch=True \
                 algorithm.adv_estimator=grpo \
                 algorithm.use_kl_in_reward=False \
                 data.train_files="['${TRAIN_FILE}']" \
@@ -462,7 +461,6 @@ if [ "${NODE_RANK}" = "0" ]; then
                 actor_rollout_ref.rollout.latr.tree_micro_batch_size=${LATR_TREE_MICRO_BATCH_SIZE:-1} \
                 actor_rollout_ref.rollout.latr.force_return_step=${LATR_TREE_MAX_TOKENS:-512} \
                 actor_rollout_ref.rollout.latr.weight_bucket_mb=${LATR_WEIGHT_BUCKET_MB:-128} \
-                ~actor_rollout_ref.actor.fsdp_config.grad_sync_every_micro_batch \
                 trainer.total_epochs=${TOTAL_EPOCHS} 2>&1 | tee -a ${LOG_PATH}/${SAVELOG_FILE_NAME}
             python_exit_code=${PIPESTATUS[0]}
             if [ "${python_exit_code}" -ne 0 ]; then

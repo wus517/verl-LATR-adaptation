@@ -286,6 +286,9 @@ class FSDPEngineConfig(EngineConfig):
     reshard_after_forward: bool = True
     fsdp_size: int = -1
     forward_prefetch: bool = False
+    # 每个 micro batch 都规约梯度（关闭梯度累积期间的 no_sync）。
+    # 大模型下 no_sync 会让完整梯度常驻显存，开启后用通信次数换显存。
+    grad_sync_every_micro_batch: bool = False
     model_dtype: str = "fp32"
     use_orig_params: bool = False
     mixed_precision: Optional[dict[str, Any]] = None

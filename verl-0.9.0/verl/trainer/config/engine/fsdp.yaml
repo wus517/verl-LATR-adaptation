@@ -28,7 +28,9 @@ fsdp_size: -1
 # Only for FSDP1: FSDP1 configuration, prefetch the next forward-pass all-gather
 # before the current forward computation.
 forward_prefetch: False
-
+# Reduce-scatter gradients on every micro-batch instead of deferring to the last one.
+# Saves memory (no unsharded grads kept across micro-batches) at the cost of more collectives.
+grad_sync_every_micro_batch: false
 # model dtype of fsdp
 model_dtype: fp32
 
